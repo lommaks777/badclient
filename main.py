@@ -46,6 +46,73 @@ def save_db(db):
     with open(DB_FILE, 'w', encoding='utf-8') as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
 
+def migrate_user_data(user_data):
+    """Миграция старых ключей ролей на новые."""
+    # Маппинг старых ключей на новые
+    old_to_new = {
+        "svetlana": "dmitry",
+        "marina": "irina",
+        # "irina" остается "irina"
+        # "oleg" остается "oleg"
+        # "victoria" остается "victoria"
+    }
+    
+    old_roles = ["svetlana", "marina", "irina", "oleg", "victoria"]
+    
+    migrated = False
+    
+    # Мигрируем completed_roles
+    if "completed_roles" in user_data:
+        # Проверяем, были ли пройдены все старые 5 уровней
+        old_completed = user_data["completed_roles"]
+        had_all_old = all(role in old_completed for role in old_roles)
+        
+        if had_all_old:
+            # Если были пройдены все старые уровни, считаем все новые уровни пройденными
+            user_data["completed_roles"] = ROLE_ORDER.copy()
+            migrated = True
+        else:
+            # Иначе мигрируем по одному
+            new_completed = []
+            for role_key in user_data["completed_roles"]:
+                if role_key in old_to_new:
+                    new_key = old_to_new[role_key]
+                    if new_key not in new_completed:
+                        new_completed.append(new_key)
+                    migrated = True
+                elif role_key in ROLE_ORDER:
+                    if role_key not in new_completed:
+                        new_completed.append(role_key)
+            user_data["completed_roles"] = new_completed
+    
+    # Мигрируем best_scores
+    if "best_scores" in user_data:
+        new_best_scores = {}
+        for role_key, score in user_data["best_scores"].items():
+            if role_key in old_to_new:
+                new_key = old_to_new[role_key]
+                if new_key not in new_best_scores or score > new_best_scores[new_key]:
+                    new_best_scores[new_key] = score
+                migrated = True
+            elif role_key in ROLE_ORDER:
+                if role_key not in new_best_scores or score > new_best_scores[role_key]:
+                    new_best_scores[role_key] = score
+        user_data["best_scores"] = new_best_scores
+    
+    # Пересчитываем total_score
+    if "best_scores" in user_data:
+        user_data["total_score"] = sum(user_data["best_scores"].values())
+    
+    # Обновляем current_level_index если нужно
+    if "current_level_index" in user_data:
+        completed_count = len(user_data.get("completed_roles", []))
+        if completed_count >= len(ROLE_ORDER):
+            user_data["current_level_index"] = len(ROLE_ORDER)
+        else:
+            user_data["current_level_index"] = completed_count
+    
+    return migrated
+
 def get_user_progress(user_id):
     """
     Получение или инициализация данных пользователя.
@@ -66,6 +133,10 @@ def get_user_progress(user_id):
             "best_scores": {}
         }
         save_db(db)
+    else:
+        # Мигрируем данные пользователя если нужно
+        if migrate_user_data(db[user_id_str]):
+            save_db(db)
     
     return db[user_id_str]
 
@@ -312,7 +383,24 @@ async def start(update: Update, context):
         
         # Показываем кнопки "Повторить" для пройденных уровней
         completed_roles = user_progress.get("completed_roles", [])
-        if completed_roles:
+        
+        # Показываем кнопки "Повторить" - всегда показываем все пройденные уровни
+        # Если все уровни пройдены (5/5), показываем все уровни для повтора
+        if len(completed_roles) >= len(ROLE_ORDER) or current_index >= len(ROLE_ORDER):
+            # Все уровни пройдены - показываем все для повтора
+            if ROLE_ORDER:
+                keyboard.append([InlineKeyboardButton("━━━ Повторить уровень ━━━", callback_data="separator")])
+                for role_key in ROLE_ORDER:
+                    if role_key in ROLES:
+                        role = ROLES[role_key]
+                        keyboard.append([
+                            InlineKeyboardButton(
+                                get_short_button_text(role, is_next=False),
+                                callback_data=f"start_role_{role_key}"
+                            )
+                        ])
+        elif completed_roles:
+            # Не все уровни пройдены - показываем только пройденные
             keyboard.append([InlineKeyboardButton("━━━ Повторить уровень ━━━", callback_data="separator")])
             # Показываем все пройденные уровни в порядке прохождения
             for role_key in ROLE_ORDER:

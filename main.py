@@ -277,6 +277,26 @@ async def start(update: Update, context):
         
         keyboard = []
         
+        # Функция для создания короткого названия кнопки
+        def get_short_button_text(role, is_next=False):
+            """Создает короткий текст для кнопки, чтобы избежать обрезания."""
+            icon = "▶️" if is_next else "🔄"
+            # Извлекаем номер уровня и короткое описание
+            level_desc = role['level_description']
+            # Ищем номер уровня (например, "Уровень 1", "Уровень 2")
+            level_match = re.search(r'Уровень\s+(\d+)', level_desc)
+            level_num = level_match.group(1) if level_match else ""
+            
+            # Извлекаем короткое описание (до первой точки или кавычки)
+            short_desc = level_desc.split('.')[0].split("'")[0].strip()
+            if len(short_desc) > 25:
+                short_desc = short_desc[:22] + "..."
+            
+            if level_num:
+                return f"{icon} {role['name']} (Ур.{level_num})"
+            else:
+                return f"{icon} {role['name']}"
+        
         # Показываем текущий (следующий) уровень для прохождения
         current_index = user_progress["current_level_index"]
         if current_index < len(ROLE_ORDER):
@@ -285,7 +305,7 @@ async def start(update: Update, context):
                 role = ROLES[role_key]
                 keyboard.append([
                     InlineKeyboardButton(
-                        f"▶️ {role['name']} ({role['level_description']})",
+                        get_short_button_text(role, is_next=True),
                         callback_data=f"start_role_{role_key}"
                     )
                 ])
@@ -294,12 +314,13 @@ async def start(update: Update, context):
         completed_roles = user_progress.get("completed_roles", [])
         if completed_roles:
             keyboard.append([InlineKeyboardButton("━━━ Повторить уровень ━━━", callback_data="separator")])
-            for role_key in completed_roles:
-                if role_key in ROLES:
+            # Показываем все пройденные уровни в порядке прохождения
+            for role_key in ROLE_ORDER:
+                if role_key in completed_roles and role_key in ROLES:
                     role = ROLES[role_key]
                     keyboard.append([
                         InlineKeyboardButton(
-                            f"🔄 {role['name']} ({role['level_description']})",
+                            get_short_button_text(role, is_next=False),
                             callback_data=f"start_role_{role_key}"
                         )
                     ])
@@ -310,7 +331,7 @@ async def start(update: Update, context):
                 role = ROLES[ROLE_ORDER[0]]
                 keyboard.append([
                     InlineKeyboardButton(
-                        f"▶️ {role['name']} ({role['level_description']})",
+                        get_short_button_text(role, is_next=True),
                         callback_data=f"start_role_{ROLE_ORDER[0]}"
                     )
                 ])

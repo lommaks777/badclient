@@ -28,7 +28,7 @@ SELECTING_ROLE, IN_DIALOG = range(2)
 DB_FILE = 'leaderboard_db.json'
 
 # Порядок прохождения уровней
-ROLE_ORDER = ["svetlana", "marina", "irina", "oleg", "victoria"]
+ROLE_ORDER = ["dmitry", "irina", "max", "oleg", "victoria"]
 
 # --- ФУНКЦИИ ХРАНЕНИЯ ДАННЫХ ---
 def load_db():

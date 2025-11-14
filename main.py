@@ -271,57 +271,82 @@ def calculate_score(role_key, message_count, llm_response):
 # --- ОБРАБОТЧИКИ TELEGRAM ---
 async def start(update: Update, context):
     """Отправляет приветственное сообщение и кнопки выбора роли с учетом прогресса."""
-    user_id = update.message.from_user.id
-    user_progress = get_user_progress(user_id)
-    
-    keyboard = []
-    
-    # Показываем текущий (следующий) уровень для прохождения
-    current_index = user_progress["current_level_index"]
-    if current_index < len(ROLE_ORDER):
-        role_key = ROLE_ORDER[current_index]
-        role = ROLES[role_key]
-        keyboard.append([
-            InlineKeyboardButton(
-                f"▶️ {role['name']} ({role['level_description']})",
-                callback_data=f"start_role_{role_key}"
+    try:
+        user_id = update.message.from_user.id
+        user_progress = get_user_progress(user_id)
+        
+        keyboard = []
+        
+        # Показываем текущий (следующий) уровень для прохождения
+        current_index = user_progress["current_level_index"]
+        if current_index < len(ROLE_ORDER):
+            role_key = ROLE_ORDER[current_index]
+            if role_key in ROLES:
+                role = ROLES[role_key]
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"▶️ {role['name']} ({role['level_description']})",
+                        callback_data=f"start_role_{role_key}"
+                    )
+                ])
+        
+        # Показываем кнопки "Повторить" для пройденных уровней
+        completed_roles = user_progress.get("completed_roles", [])
+        if completed_roles:
+            keyboard.append([InlineKeyboardButton("━━━ Повторить уровень ━━━", callback_data="separator")])
+            for role_key in completed_roles:
+                if role_key in ROLES:
+                    role = ROLES[role_key]
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"🔄 {role['name']} ({role['level_description']})",
+                            callback_data=f"start_role_{role_key}"
+                        )
+                    ])
+        
+        # Если нет кнопок, создаем хотя бы одну для первого уровня
+        if not keyboard:
+            if ROLE_ORDER and ROLE_ORDER[0] in ROLES:
+                role = ROLES[ROLE_ORDER[0]]
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"▶️ {role['name']} ({role['level_description']})",
+                        callback_data=f"start_role_{ROLE_ORDER[0]}"
+                    )
+                ])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+        
+        # Формируем сообщение с прогрессом
+        progress_text = f"👋 Привет! Я твой тренажер 'Вредный Клиент'.\n\n"
+        
+        if user_progress["total_score"] > 0:
+            progress_text += f"📊 Твой общий счет: {user_progress['total_score']:.2f} баллов\n"
+            progress_text += f"✅ Пройдено уровней: {len(completed_roles)}/{len(ROLE_ORDER)}\n\n"
+        
+        if current_index < len(ROLE_ORDER):
+            progress_text += f"🎯 Следующий уровень:\n"
+        else:
+            progress_text += f"🎉 Поздравляю! Ты прошел все уровни!\n"
+        
+        progress_text += "\nВыбери уровень для тренировки:"
+        
+        await update.message.reply_text(
+            progress_text,
+            reply_markup=reply_markup
+        )
+        return SELECTING_ROLE
+    except Exception as e:
+        print(f"Ошибка в функции start: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            await update.message.reply_text(
+                f"Произошла ошибка: {str(e)}\n\nПопробуйте еще раз или используйте /start"
             )
-        ])
-    
-    # Показываем кнопки "Повторить" для пройденных уровней
-    completed_roles = user_progress.get("completed_roles", [])
-    if completed_roles:
-        keyboard.append([InlineKeyboardButton("━━━ Повторить уровень ━━━", callback_data="separator")])
-        for role_key in completed_roles:
-            role = ROLES[role_key]
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"🔄 {role['name']} ({role['level_description']})",
-                    callback_data=f"start_role_{role_key}"
-                )
-            ])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
-    
-    # Формируем сообщение с прогрессом
-    progress_text = f"👋 Привет! Я твой тренажер 'Вредный Клиент'.\n\n"
-    
-    if user_progress["total_score"] > 0:
-        progress_text += f"📊 Твой общий счет: {user_progress['total_score']:.2f} баллов\n"
-        progress_text += f"✅ Пройдено уровней: {len(completed_roles)}/{len(ROLE_ORDER)}\n\n"
-    
-    if current_index < len(ROLE_ORDER):
-        progress_text += f"🎯 Следующий уровень:\n"
-    else:
-        progress_text += f"🎉 Поздравляю! Ты прошел все уровни!\n"
-    
-    progress_text += "\nВыбери уровень для тренировки:"
-    
-    await update.message.reply_text(
-        progress_text,
-        reply_markup=reply_markup
-    )
-    return SELECTING_ROLE
+        except:
+            pass
+        return ConversationHandler.END
 
 async def select_role_callback(update: Update, context):
     """Обработка выбора роли и начало диалога."""
@@ -500,26 +525,45 @@ async def fallback(update: Update, context):
     await update.message.reply_text("Извините, я вас не понял. Используйте /start для начала.")
     return ConversationHandler.END
 
+# --- ОБРАБОТЧИК ОШИБОК ---
+async def error_handler(update: object, context):
+    """Обработчик ошибок."""
+    print(f"Ошибка при обработке update: {update}")
+    import traceback
+    traceback.print_exc()
+
 # --- ОСНОВНАЯ ФУНКЦИЯ BOT RUNNER ---
 def main():
     """Запуск бота."""
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Создание ConversationHandler для управления состояниями
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            SELECTING_ROLE: [CallbackQueryHandler(select_role_callback, pattern='^start_role_|^separator$')],
-            IN_DIALOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)],
-        },
-        fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)],
-        allow_reentry=True
-    )
-    
-    application.add_handler(conv_handler)
-    
-    print("Бот запущен...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        print("Инициализация бота...")
+        application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        # Добавляем обработчик ошибок
+        application.add_error_handler(error_handler)
+        
+        # Создание ConversationHandler для управления состояниями
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler("start", start)],
+            states={
+                SELECTING_ROLE: [CallbackQueryHandler(select_role_callback, pattern='^start_role_|^separator$')],
+                IN_DIALOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)],
+            },
+            fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)],
+            allow_reentry=True
+        )
+        
+        application.add_handler(conv_handler)
+        
+        print("Бот запущен и готов к работе...")
+        print(f"Проверка: ROLE_ORDER = {ROLE_ORDER}")
+        print(f"Проверка: ROLES keys = {list(ROLES.keys())}")
+        
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    except Exception as e:
+        print(f"Критическая ошибка при запуске бота: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()

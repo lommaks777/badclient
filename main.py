@@ -1,5 +1,6 @@
 # main.py
 import json
+import re
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -24,8 +25,12 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 SELECTING_ROLE, IN_DIALOG = range(2)
 DB_FILE = 'leaderboard_db.json'
 
+# Порядок прохождения уровней
+ROLE_ORDER = ["svetlana", "marina", "irina", "oleg", "victoria"]
+
 # --- ФУНКЦИИ ХРАНЕНИЯ ДАННЫХ ---
 def load_db():
+    """Загрузка базы данных пользователей."""
     try:
         with open(DB_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -33,14 +38,69 @@ def load_db():
         return {}
 
 def save_db(db):
+    """Сохранение базы данных пользователей."""
     with open(DB_FILE, 'w', encoding='utf-8') as f:
         json.dump(db, f, ensure_ascii=False, indent=4)
 
-# --- LLM ИНТЕГРАЦИЯ ---
-def get_llm_response(user_id, role_key, message_text):
+def get_user_progress(user_id):
     """
-    Основная функция для запроса к LLM.
-    Должна использовать историю диалога, хранящуюся в user_data.
+    Получение или инициализация данных пользователя.
+    Возвращает словарь с ключами:
+    - completed_roles: список пройденных ролей
+    - current_level_index: индекс следующей роли для прохождения
+    - total_score: общий счет пользователя
+    - best_scores: лучшие счета по каждой роли
+    """
+    db = load_db()
+    user_id_str = str(user_id)
+    
+    if user_id_str not in db:
+        db[user_id_str] = {
+            "completed_roles": [],
+            "current_level_index": 0,
+            "total_score": 0,
+            "best_scores": {}
+        }
+        save_db(db)
+    
+    return db[user_id_str]
+
+def update_user_progress(user_id, role_key, score):
+    """Обновление прогресса пользователя после победы."""
+    db = load_db()
+    user_id_str = str(user_id)
+    user_data = get_user_progress(user_id)
+    
+    # Добавляем роль в список пройденных, если еще не пройдена
+    if role_key not in user_data["completed_roles"]:
+        user_data["completed_roles"].append(role_key)
+        # Обновляем индекс следующего уровня
+        if user_data["current_level_index"] < len(ROLE_ORDER) - 1:
+            user_data["current_level_index"] += 1
+    
+    # Обновляем лучший счет для роли
+    if role_key not in user_data["best_scores"] or score > user_data["best_scores"][role_key]:
+        user_data["best_scores"][role_key] = score
+    
+    # Обновляем общий счет
+    user_data["total_score"] = sum(user_data["best_scores"].values())
+    
+    db[user_id_str] = user_data
+    save_db(db)
+    
+    return user_data
+
+# --- LLM ИНТЕГРАЦИЯ ---
+def get_llm_response(role_key, dialog_history):
+    """
+    Основная функция для запроса к LLM с полной историей диалога.
+    
+    Args:
+        role_key: ключ роли из ROLES
+        dialog_history: список сообщений в формате [{"role": "user"/"client", "content": "..."}, ...]
+    
+    Returns:
+        Ответ от LLM
     """
     # Загрузка данных роли
     role = ROLES[role_key]
@@ -48,16 +108,21 @@ def get_llm_response(user_id, role_key, message_text):
     # Формирование системного промта
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(**role)
     
-    # !!! Здесь будет логика для добавления ИСТОРИИ ДИАЛОГА !!!
-    # Пока что заглушка:
+    # Формирование списка сообщений для API
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": message_text}
     ]
     
+    # Преобразование истории диалога
+    for message in dialog_history:
+        # 'client' в user_data соответствует 'assistant' в API OpenAI
+        api_role = 'assistant' if message['role'] == 'client' else 'user'
+        messages.append({
+            "role": api_role,
+            "content": message['content']
+        })
+    
     try:
-        # !!! Асинхронный вызов LLM (требует refactor на aiogram или async в python-telegram-bot)
-        # Для простоты первого шага оставим синхронно:
         response = openai_client.chat.completions.create(
             model=LLM_MODEL,
             messages=messages,
@@ -68,19 +133,119 @@ def get_llm_response(user_id, role_key, message_text):
         print(f"Ошибка LLM: {e}")
         return "Извините, сейчас я немного занят... Кажется, у меня проблемы с памятью. Попробуйте еще раз."
 
+def calculate_score(role_key, message_count, llm_response):
+    """
+    Расчет очков на основе формулы:
+    Счет = Множитель Уровня × (Базовый балл от LLM / Количество Сообщений Ученика)
+    
+    Args:
+        role_key: ключ роли
+        message_count: количество сообщений ученика
+        llm_response: ответ от LLM (может содержать анализ и оценку)
+    
+    Returns:
+        dict с ключами: base_score, final_score, achievement
+    """
+    role = ROLES[role_key]
+    multiplier = role['multiplier']
+    
+    # Парсинг базовой оценки из ответа LLM (0-20 баллов)
+    base_score = 10  # Значение по умолчанию
+    
+    # Ищем оценку в ответе LLM
+    score_patterns = [
+        r'(\d+)\s*балл',
+        r'оценк[аиуе]\s*[:\-]?\s*(\d+)',
+        r'(\d+)\s*из\s*20',
+        r'(\d+)/20',
+        r'оцен[аиуе]\s*(\d+)',
+    ]
+    
+    for pattern in score_patterns:
+        match = re.search(pattern, llm_response, re.IGNORECASE)
+        if match:
+            try:
+                parsed_score = int(match.group(1))
+                if 0 <= parsed_score <= 20:
+                    base_score = parsed_score
+                    break
+            except ValueError:
+                continue
+    
+    # Расчет финального счета
+    if message_count == 0:
+        message_count = 1  # Избегаем деления на ноль
+    
+    final_score = multiplier * (base_score / message_count)
+    
+    # Определение достижения
+    achievement = None
+    if base_score >= 18:
+        achievement = "🌟 Мастер переговоров"
+    elif base_score >= 15:
+        achievement = "💎 Профессионал"
+    elif base_score >= 12:
+        achievement = "⭐ Хорошая работа"
+    elif base_score >= 8:
+        achievement = "👍 Неплохо"
+    
+    return {
+        "base_score": base_score,
+        "final_score": round(final_score, 2),
+        "achievement": achievement
+    }
+
 # --- ОБРАБОТЧИКИ TELEGRAM ---
 async def start(update: Update, context):
-    """Отправляет приветственное сообщение и кнопки выбора роли."""
-    keyboard = []
-    for key, role in ROLES.items():
-        # Кнопка для выбора роли
-        keyboard.append([InlineKeyboardButton(f"{role['name']} ({role['level_description']})", callback_data=f"start_role_{key}")])
+    """Отправляет приветственное сообщение и кнопки выбора роли с учетом прогресса."""
+    user_id = update.message.from_user.id
+    user_progress = get_user_progress(user_id)
     
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = []
+    
+    # Показываем текущий (следующий) уровень для прохождения
+    current_index = user_progress["current_level_index"]
+    if current_index < len(ROLE_ORDER):
+        role_key = ROLE_ORDER[current_index]
+        role = ROLES[role_key]
+        keyboard.append([
+            InlineKeyboardButton(
+                f"▶️ {role['name']} ({role['level_description']})",
+                callback_data=f"start_role_{role_key}"
+            )
+        ])
+    
+    # Показываем кнопки "Повторить" для пройденных уровней
+    completed_roles = user_progress.get("completed_roles", [])
+    if completed_roles:
+        keyboard.append([InlineKeyboardButton("━━━ Повторить уровень ━━━", callback_data="separator")])
+        for role_key in completed_roles:
+            role = ROLES[role_key]
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🔄 {role['name']} ({role['level_description']})",
+                    callback_data=f"start_role_{role_key}"
+                )
+            ])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    
+    # Формируем сообщение с прогрессом
+    progress_text = f"👋 Привет! Я твой тренажер 'Вредный Клиент'.\n\n"
+    
+    if user_progress["total_score"] > 0:
+        progress_text += f"📊 Твой общий счет: {user_progress['total_score']:.2f} баллов\n"
+        progress_text += f"✅ Пройдено уровней: {len(completed_roles)}/{len(ROLE_ORDER)}\n\n"
+    
+    if current_index < len(ROLE_ORDER):
+        progress_text += f"🎯 Следующий уровень:\n"
+    else:
+        progress_text += f"🎉 Поздравляю! Ты прошел все уровни!\n"
+    
+    progress_text += "\nВыбери уровень для тренировки:"
     
     await update.message.reply_text(
-        "👋 Привет! Я твой тренажер 'Вредный Клиент'.\n"
-        "Выбери, с кем хочешь потренироваться сегодня:",
+        progress_text,
         reply_markup=reply_markup
     )
     return SELECTING_ROLE
@@ -90,6 +255,9 @@ async def select_role_callback(update: Update, context):
     query = update.callback_query
     await query.answer()
     
+    if query.data == "separator":
+        return SELECTING_ROLE
+    
     role_key = query.data.split('_')[2]
     role = ROLES[role_key]
     
@@ -98,13 +266,12 @@ async def select_role_callback(update: Update, context):
     context.user_data['role_key'] = role_key
     context.user_data['message_count'] = 0
     
-    # Отправляем первый запрос в LLM, чтобы он начал диалог
-    initial_message = f"Начинаем диалог с {role['name']}. Я сыграю роль клиента. Твоя очередь."
+    # Формируем начальное сообщение для первого хода клиента
+    initial_prompt = "Начинаем диалог. Ты играешь роль клиента. Начни диалог с первого сообщения, как будто ты только что увидел предложение о массаже или тебе написали."
     
-    # Используем get_llm_response для первого шага клиента
-    # В идеале нужно сделать отдельный запрос для первого хода клиента
-    # Но для старта можно и так:
-    client_start_message = get_llm_response(query.from_user.id, role_key, initial_message)
+    # Первый запрос к LLM для начала диалога
+    initial_dialog = [{"role": "user", "content": initial_prompt}]
+    client_start_message = get_llm_response(role_key, initial_dialog)
     
     await query.edit_message_text(
         text=f"*** Вы выбрали: {role['name']} ***\n\n"
@@ -124,20 +291,74 @@ async def handle_message(update: Update, context):
     user_id = update.message.from_user.id
     role_key = context.user_data.get('role_key')
     
+    if not role_key:
+        await update.message.reply_text("Ошибка: роль не выбрана. Используйте /start")
+        return ConversationHandler.END
+    
     context.user_data['message_count'] += 1
     
     # Добавляем сообщение ученика в историю
     context.user_data['dialog'].append({"role": "user", "content": user_text})
     
-    # Получаем ответ от LLM
-    llm_response = get_llm_response(user_id, role_key, user_text) # Простая реализация
+    # Получаем ответ от LLM с полной историей диалога
+    llm_response = get_llm_response(role_key, context.user_data['dialog'])
     
-    # !!! Здесь должна быть логика ПРОВЕРКИ УСПЕХА по llm_response !!!
-    # Пока что заглушка:
-    if "Окей, договорились" in llm_response:
-        # Успех!
-        await update.message.reply_text(f"🥳 ПОБЕДА!\n\n{llm_response}\n\n[Здесь будет анализ и подсчет баллов]")
-        return ConversationHandler.END # Завершаем диалог
+    # Проверка на победу
+    victory_phrases = [
+        "Окей, договорились",
+        "окей, договорились",
+        "Хорошо, договорились",
+        "хорошо, договорились",
+        "Договорились",
+        "договорились",
+        "Согласен",
+        "согласен",
+        "Согласна",
+        "согласна"
+    ]
+    
+    is_victory = any(phrase in llm_response for phrase in victory_phrases)
+    
+    if is_victory:
+        # Победа! Рассчитываем очки и обновляем прогресс
+        message_count = context.user_data.get('message_count', 1)
+        score_data = calculate_score(role_key, message_count, llm_response)
+        
+        # Обновляем прогресс пользователя
+        user_progress = update_user_progress(user_id, role_key, score_data['final_score'])
+        
+        # Формируем сообщение о победе
+        victory_message = f"🥳 ПОБЕДА!\n\n"
+        victory_message += f"{llm_response}\n\n"
+        victory_message += f"━━━━━━━━━━━━━━━━━━━━\n"
+        victory_message += f"📊 Результаты:\n"
+        victory_message += f"• Базовая оценка: {score_data['base_score']}/20\n"
+        victory_message += f"• Финальный счет: {score_data['final_score']:.2f} баллов\n"
+        victory_message += f"• Сообщений отправлено: {message_count}\n"
+        
+        if score_data['achievement']:
+            victory_message += f"• Достижение: {score_data['achievement']}\n"
+        
+        victory_message += f"\n📈 Прогресс:\n"
+        victory_message += f"• Пройдено уровней: {len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}\n"
+        victory_message += f"• Общий счет: {user_progress['total_score']:.2f} баллов\n"
+        
+        # Проверяем, есть ли следующий уровень
+        if user_progress['current_level_index'] < len(ROLE_ORDER):
+            next_role_key = ROLE_ORDER[user_progress['current_level_index']]
+            next_role = ROLES[next_role_key]
+            victory_message += f"\n🎯 Следующий уровень: {next_role['name']}\n"
+        else:
+            victory_message += f"\n🎉 Поздравляю! Ты прошел все уровни!\n"
+        
+        victory_message += f"\nИспользуй /start для продолжения."
+        
+        await update.message.reply_text(victory_message)
+        
+        # Очищаем состояние диалога
+        context.user_data.clear()
+        
+        return ConversationHandler.END
     
     # Добавляем ответ клиента в историю
     context.user_data['dialog'].append({"role": "client", "content": llm_response})
@@ -159,7 +380,7 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            SELECTING_ROLE: [CallbackQueryHandler(select_role_callback, pattern='^start_role_')],
+            SELECTING_ROLE: [CallbackQueryHandler(select_role_callback, pattern='^start_role_|^separator$')],
             IN_DIALOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)],
         },
         fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)],
@@ -168,11 +389,8 @@ def main():
     
     application.add_handler(conv_handler)
     
-    # Добавить позже: CommandHandler('top', show_leaderboard)
-    
     print("Бот запущен...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-

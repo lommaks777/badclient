@@ -2,8 +2,10 @@
 import json
 import re
 import asyncio
+import time
 from concurrent.futures import ThreadPoolExecutor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -138,10 +140,36 @@ def get_llm_response(role_key, dialog_history):
         print(f"Ошибка LLM: {e}")
         return "Извините, сейчас я немного занят... Кажется, у меня проблемы с памятью. Попробуйте еще раз."
 
-async def get_llm_response_async(role_key, dialog_history):
-    """Асинхронная обертка для get_llm_response."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, get_llm_response, role_key, dialog_history)
+async def send_typing_periodically(chat_id, bot, duration=60):
+    """Периодически отправляет индикатор печати пока идет обработка."""
+    start_time = time.time()
+    while (time.time() - start_time) < duration:
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+            await asyncio.sleep(3)  # Telegram требует обновлять каждые 3-5 секунд
+        except Exception as e:
+            print(f"Ошибка при отправке typing indicator: {e}")
+            break
+
+async def get_llm_response_async(role_key, dialog_history, chat_id=None, bot=None):
+    """Асинхронная обертка для get_llm_response с индикатором печати."""
+    # Запускаем задачу для периодической отправки typing indicator
+    typing_task = None
+    if chat_id and bot:
+        typing_task = asyncio.create_task(send_typing_periodically(chat_id, bot))
+    
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(executor, get_llm_response, role_key, dialog_history)
+        return result
+    finally:
+        # Отменяем задачу typing indicator после получения ответа
+        if typing_task:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
 
 def split_long_message(text, max_length=4000):
     """Разбивает длинное сообщение на части для Telegram (лимит 4096 символов)."""
@@ -314,9 +342,17 @@ async def select_role_callback(update: Update, context):
     # Формируем начальное сообщение для первого хода клиента
     initial_prompt = "Начинаем диалог. Ты играешь роль клиента. Начни диалог с первого сообщения, как будто ты только что увидел предложение о массаже или тебе написали."
     
+    # Показываем индикатор печати
+    await query.message.chat.send_action(ChatAction.TYPING)
+    
     # Первый запрос к LLM для начала диалога
     initial_dialog = [{"role": "user", "content": initial_prompt}]
-    client_start_message = await get_llm_response_async(role_key, initial_dialog)
+    client_start_message = await get_llm_response_async(
+        role_key, 
+        initial_dialog,
+        chat_id=query.message.chat_id,
+        bot=context.bot
+    )
     
     await query.edit_message_text(
         text=f"*** Вы выбрали: {role['name']} ***\n\n"
@@ -345,9 +381,17 @@ async def handle_message(update: Update, context):
     # Добавляем сообщение ученика в историю
     context.user_data['dialog'].append({"role": "user", "content": user_text})
     
+    # Показываем индикатор печати
+    await update.message.chat.send_action(ChatAction.TYPING)
+    
     # Получаем ответ от LLM с полной историей диалога (асинхронно)
     try:
-        llm_response = await get_llm_response_async(role_key, context.user_data['dialog'])
+        llm_response = await get_llm_response_async(
+            role_key, 
+            context.user_data['dialog'],
+            chat_id=update.message.chat_id,
+            bot=context.bot
+        )
     except Exception as e:
         print(f"Ошибка при получении ответа LLM: {e}")
         await update.message.reply_text("Извините, произошла ошибка при обработке запроса. Попробуйте еще раз.")

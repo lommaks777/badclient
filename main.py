@@ -1,6 +1,8 @@
 # main.py
 import json
 import re
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -91,6 +93,9 @@ def update_user_progress(user_id, role_key, score):
     return user_data
 
 # --- LLM ИНТЕГРАЦИЯ ---
+# Executor для синхронных вызовов OpenAI в асинхронном контексте
+executor = ThreadPoolExecutor(max_workers=2)
+
 def get_llm_response(role_key, dialog_history):
     """
     Основная функция для запроса к LLM с полной историей диалога.
@@ -132,6 +137,46 @@ def get_llm_response(role_key, dialog_history):
     except Exception as e:
         print(f"Ошибка LLM: {e}")
         return "Извините, сейчас я немного занят... Кажется, у меня проблемы с памятью. Попробуйте еще раз."
+
+async def get_llm_response_async(role_key, dialog_history):
+    """Асинхронная обертка для get_llm_response."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, get_llm_response, role_key, dialog_history)
+
+def split_long_message(text, max_length=4000):
+    """Разбивает длинное сообщение на части для Telegram (лимит 4096 символов)."""
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    current_part = ""
+    
+    # Разбиваем по абзацам
+    paragraphs = text.split('\n\n')
+    
+    for para in paragraphs:
+        if len(current_part) + len(para) + 2 <= max_length:
+            current_part += para + '\n\n'
+        else:
+            if current_part:
+                parts.append(current_part.strip())
+            # Если параграф сам по себе длиннее лимита, разбиваем по предложениям
+            if len(para) > max_length:
+                sentences = para.split('. ')
+                for sent in sentences:
+                    if len(current_part) + len(sent) + 2 <= max_length:
+                        current_part += sent + '. '
+                    else:
+                        if current_part:
+                            parts.append(current_part.strip())
+                        current_part = sent + '. '
+            else:
+                current_part = para + '\n\n'
+    
+    if current_part:
+        parts.append(current_part.strip())
+    
+    return parts if parts else [text[:max_length]]
 
 def calculate_score(role_key, message_count, llm_response):
     """
@@ -271,7 +316,7 @@ async def select_role_callback(update: Update, context):
     
     # Первый запрос к LLM для начала диалога
     initial_dialog = [{"role": "user", "content": initial_prompt}]
-    client_start_message = get_llm_response(role_key, initial_dialog)
+    client_start_message = await get_llm_response_async(role_key, initial_dialog)
     
     await query.edit_message_text(
         text=f"*** Вы выбрали: {role['name']} ***\n\n"
@@ -300,8 +345,13 @@ async def handle_message(update: Update, context):
     # Добавляем сообщение ученика в историю
     context.user_data['dialog'].append({"role": "user", "content": user_text})
     
-    # Получаем ответ от LLM с полной историей диалога
-    llm_response = get_llm_response(role_key, context.user_data['dialog'])
+    # Получаем ответ от LLM с полной историей диалога (асинхронно)
+    try:
+        llm_response = await get_llm_response_async(role_key, context.user_data['dialog'])
+    except Exception as e:
+        print(f"Ошибка при получении ответа LLM: {e}")
+        await update.message.reply_text("Извините, произошла ошибка при обработке запроса. Попробуйте еще раз.")
+        return IN_DIALOG
     
     # Проверка на победу
     victory_phrases = [
@@ -353,7 +403,30 @@ async def handle_message(update: Update, context):
         
         victory_message += f"\nИспользуй /start для продолжения."
         
-        await update.message.reply_text(victory_message)
+        # Разбиваем длинное сообщение на части если нужно
+        message_parts = split_long_message(victory_message)
+        
+        try:
+            # Отправляем первую часть
+            await update.message.reply_text(message_parts[0])
+            
+            # Отправляем остальные части если есть
+            for part in message_parts[1:]:
+                await update.message.reply_text(part)
+        except Exception as e:
+            print(f"Ошибка при отправке сообщения о победе: {e}")
+            # Отправляем упрощенное сообщение
+            try:
+                await update.message.reply_text(
+                    f"🥳 ПОБЕДА!\n\n"
+                    f"📊 Результаты:\n"
+                    f"• Базовая оценка: {score_data['base_score']}/20\n"
+                    f"• Финальный счет: {score_data['final_score']:.2f} баллов\n"
+                    f"• Пройдено уровней: {len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}\n\n"
+                    f"Используй /start для продолжения."
+                )
+            except Exception as e2:
+                print(f"Критическая ошибка при отправке сообщения: {e2}")
         
         # Очищаем состояние диалога
         context.user_data.clear()
@@ -363,7 +436,19 @@ async def handle_message(update: Update, context):
     # Добавляем ответ клиента в историю
     context.user_data['dialog'].append({"role": "client", "content": llm_response})
     
-    await update.message.reply_text(f"💬 Клиент: {llm_response}")
+    # Разбиваем длинный ответ на части если нужно
+    client_message = f"💬 Клиент: {llm_response}"
+    message_parts = split_long_message(client_message)
+    
+    try:
+        await update.message.reply_text(message_parts[0])
+        # Отправляем остальные части если есть
+        for part in message_parts[1:]:
+            await update.message.reply_text(part)
+    except Exception as e:
+        print(f"Ошибка при отправке ответа клиента: {e}")
+        await update.message.reply_text("💬 Клиент: [Сообщение слишком длинное, попробуйте продолжить диалог]")
+    
     return IN_DIALOG
 
 async def fallback(update: Update, context):

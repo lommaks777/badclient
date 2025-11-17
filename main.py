@@ -701,6 +701,8 @@ def main():
         application.add_error_handler(error_handler)
         
         # Создание ConversationHandler для управления состояниями
+        # Используем значения по умолчанию (per_chat=True, per_user=True, per_message=False)
+        # Предупреждение о per_message можно игнорировать - это нормально для смешанных обработчиков
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler("start", start)],
             states={
@@ -708,8 +710,7 @@ def main():
                 IN_DIALOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)],
             },
             fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)],
-            allow_reentry=True,
-            per_message=True  # Убирает предупреждение для CallbackQueryHandler
+            allow_reentry=True
         )
         
         application.add_handler(conv_handler)

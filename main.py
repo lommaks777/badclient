@@ -708,7 +708,8 @@ def main():
                 IN_DIALOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)],
             },
             fallbacks=[CommandHandler("start", start), MessageHandler(filters.ALL, fallback)],
-            allow_reentry=True
+            allow_reentry=True,
+            per_message=True  # Убирает предупреждение для CallbackQueryHandler
         )
         
         application.add_handler(conv_handler)

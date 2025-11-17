@@ -19,151 +19,31 @@ from telegram.ext import (
 from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, LLM_MODEL
 from roles_data import ROLES, SYSTEM_PROMPT_TEMPLATE
 
+# Импорт модуля базы данных
+from db import (
+    init_db, 
+    create_tables, 
+    get_user_progress, 
+    update_user_progress
+)
+
 # Импорт OpenAI (или другого LLM)
 from openai import OpenAI 
 
 # Настройка клиента OpenAI
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
+# Установим более мощную модель специально для АНАЛИЗА
+ANALYSIS_MODEL = "gpt-4o"
+
 # --- КОНСТАНТЫ СОСТОЯНИЙ ДЛЯ ConversationHandler ---
 SELECTING_ROLE, IN_DIALOG = range(2)
-DB_FILE = 'leaderboard_db.json'
 
 # Порядок прохождения уровней
 ROLE_ORDER = ["dmitry", "irina", "max", "oleg", "victoria"]
 
 # --- ФУНКЦИИ ХРАНЕНИЯ ДАННЫХ ---
-def load_db():
-    """Загрузка базы данных пользователей."""
-    try:
-        with open(DB_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def save_db(db):
-    """Сохранение базы данных пользователей."""
-    with open(DB_FILE, 'w', encoding='utf-8') as f:
-        json.dump(db, f, ensure_ascii=False, indent=4)
-
-def migrate_user_data(user_data):
-    """Миграция старых ключей ролей на новые."""
-    # Маппинг старых ключей на новые
-    old_to_new = {
-        "svetlana": "dmitry",
-        "marina": "irina",
-        # "irina" остается "irina"
-        # "oleg" остается "oleg"
-        # "victoria" остается "victoria"
-    }
-    
-    old_roles = ["svetlana", "marina", "irina", "oleg", "victoria"]
-    
-    migrated = False
-    
-    # Мигрируем completed_roles
-    if "completed_roles" in user_data:
-        # Проверяем, были ли пройдены все старые 5 уровней
-        old_completed = user_data["completed_roles"]
-        had_all_old = all(role in old_completed for role in old_roles)
-        
-        if had_all_old:
-            # Если были пройдены все старые уровни, считаем все новые уровни пройденными
-            user_data["completed_roles"] = ROLE_ORDER.copy()
-            migrated = True
-        else:
-            # Иначе мигрируем по одному
-            new_completed = []
-            for role_key in user_data["completed_roles"]:
-                if role_key in old_to_new:
-                    new_key = old_to_new[role_key]
-                    if new_key not in new_completed:
-                        new_completed.append(new_key)
-                    migrated = True
-                elif role_key in ROLE_ORDER:
-                    if role_key not in new_completed:
-                        new_completed.append(role_key)
-            user_data["completed_roles"] = new_completed
-    
-    # Мигрируем best_scores
-    if "best_scores" in user_data:
-        new_best_scores = {}
-        for role_key, score in user_data["best_scores"].items():
-            if role_key in old_to_new:
-                new_key = old_to_new[role_key]
-                if new_key not in new_best_scores or score > new_best_scores[new_key]:
-                    new_best_scores[new_key] = score
-                migrated = True
-            elif role_key in ROLE_ORDER:
-                if role_key not in new_best_scores or score > new_best_scores[role_key]:
-                    new_best_scores[role_key] = score
-        user_data["best_scores"] = new_best_scores
-    
-    # Пересчитываем total_score
-    if "best_scores" in user_data:
-        user_data["total_score"] = sum(user_data["best_scores"].values())
-    
-    # Обновляем current_level_index если нужно
-    if "current_level_index" in user_data:
-        completed_count = len(user_data.get("completed_roles", []))
-        if completed_count >= len(ROLE_ORDER):
-            user_data["current_level_index"] = len(ROLE_ORDER)
-        else:
-            user_data["current_level_index"] = completed_count
-    
-    return migrated
-
-def get_user_progress(user_id):
-    """
-    Получение или инициализация данных пользователя.
-    Возвращает словарь с ключами:
-    - completed_roles: список пройденных ролей
-    - current_level_index: индекс следующей роли для прохождения
-    - total_score: общий счет пользователя
-    - best_scores: лучшие счета по каждой роли
-    """
-    db = load_db()
-    user_id_str = str(user_id)
-    
-    if user_id_str not in db:
-        db[user_id_str] = {
-            "completed_roles": [],
-            "current_level_index": 0,
-            "total_score": 0,
-            "best_scores": {}
-        }
-        save_db(db)
-    else:
-        # Мигрируем данные пользователя если нужно
-        if migrate_user_data(db[user_id_str]):
-            save_db(db)
-    
-    return db[user_id_str]
-
-def update_user_progress(user_id, role_key, score):
-    """Обновление прогресса пользователя после победы."""
-    db = load_db()
-    user_id_str = str(user_id)
-    user_data = get_user_progress(user_id)
-    
-    # Добавляем роль в список пройденных, если еще не пройдена
-    if role_key not in user_data["completed_roles"]:
-        user_data["completed_roles"].append(role_key)
-        # Обновляем индекс следующего уровня
-        if user_data["current_level_index"] < len(ROLE_ORDER) - 1:
-            user_data["current_level_index"] += 1
-    
-    # Обновляем лучший счет для роли
-    if role_key not in user_data["best_scores"] or score > user_data["best_scores"][role_key]:
-        user_data["best_scores"][role_key] = score
-    
-    # Обновляем общий счет
-    user_data["total_score"] = sum(user_data["best_scores"].values())
-    
-    db[user_id_str] = user_data
-    save_db(db)
-    
-    return user_data
+# Все функции работы с БД теперь в модуле db.py
 
 # --- LLM ИНТЕГРАЦИЯ ---
 # Executor для синхронных вызовов OpenAI в асинхронном контексте
@@ -210,6 +90,67 @@ def get_llm_response(role_key, dialog_history):
     except Exception as e:
         print(f"Ошибка LLM: {e}")
         return "Извините, сейчас я немного занят... Кажется, у меня проблемы с памятью. Попробуйте еще раз."
+
+def get_analysis(dialog_history, role_key):
+    """
+    Создает второй запрос к мощной модели (GPT-4) для генерации подробного анализа диалога.
+    
+    Args:
+        dialog_history: список сообщений в формате [{"role": "user"/"client", "content": "..."}, ...]
+        role_key: ключ роли из ROLES
+    
+    Returns:
+        Текст анализа от GPT-4
+    """
+    # Форматируем историю для промта
+    formatted_dialog = ""
+    for msg in dialog_history:
+        # Убираем системные реплики для чистоты анализа
+        role_label = "Ученик" if msg['role'] == 'user' else "Клиент"
+        formatted_dialog += f"{role_label}: {msg['content']}\n"
+    
+    role = ROLES[role_key]
+    analysis_prompt = f"""
+Проанализируй следующий диалог по продажам массажа.
+
+Роль клиента: {role['name']} (Главное возражение: {role['main_objection']}).
+
+Цель ученика была - уговорить клиента записаться.
+
+
+
+--- ДИАЛОГ ---
+
+{formatted_dialog}
+
+---
+
+
+
+Выполни детальный анализ в следующем формате (четыре пункта):
+
+1. 👍 Сильные стороны ученика (что сделал правильно, например, задал открытый вопрос).
+
+2. ❌ Ошибки и слабые моменты (что упустил или сделал неуверенно).
+
+3. 💡 Что можно было сделать лучше (конкретные фразы или техники).
+
+4. Оцени результат от 0 до 20 баллов (только числовое значение) и заверши предложением 'Базовая оценка: [число]/20'.
+"""
+    
+    try:
+        response = openai_client.chat.completions.create(
+            model=ANALYSIS_MODEL,  # Используем мощную модель
+            messages=[
+                {"role": "system", "content": "Ты — эксперт по продажам массажа и наставник, который дает честную и детальную обратную связь."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            temperature=0.3
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"Ошибка при генерации анализа GPT-4: {e}")
+        return "Не удалось сгенерировать подробный анализ из-за ошибки API."
 
 async def send_typing_periodically(chat_id, bot, duration=60):
     """Периодически отправляет индикатор печати пока идет обработка."""
@@ -548,49 +489,99 @@ async def handle_message(update: Update, context):
     is_victory = any(phrase in llm_response for phrase in victory_phrases)
     
     if is_victory:
-        # Победа! Рассчитываем очки и обновляем прогресс
+        # Победа! Генерируем детальный анализ через GPT-4
         message_count = context.user_data.get('message_count', 1)
-        score_data = calculate_score(role_key, message_count, llm_response)
+        
+        # --- НОВАЯ ЛОГИКА: ГЕНЕРАЦИЯ АНАЛИЗА ---
+        # 1. Генерируем детальный анализ через GPT-4
+        analysis_text = get_analysis(context.user_data['dialog'], role_key)
+        
+        # 2. Парсим базовую оценку из анализа для расчета счета
+        base_score = 10  # Значение по умолчанию
+        try:
+            # Ищем число в конце строки "Базовая оценка: [число]/20"
+            score_line = next(line for line in analysis_text.split('\n') if 'Базовая оценка:' in line)
+            base_score_str = score_line.split(':')[-1].split('/')[0].strip()
+            base_score = int(base_score_str)
+        except (StopIteration, ValueError):
+            pass  # Оставляем 10, если не нашли
+        
+        # 3. Рассчитываем финальный счет с использованием базовой оценки из анализа
+        role = ROLES[role_key]
+        multiplier = role['multiplier']
+        if message_count == 0:
+            message_count = 1  # Избегаем деления на ноль
+        final_score = multiplier * (base_score / message_count)
+        
+        # Определение достижения
+        achievement = None
+        if base_score >= 18:
+            achievement = "🌟 Мастер переговоров"
+        elif base_score >= 15:
+            achievement = "💎 Профессионал"
+        elif base_score >= 12:
+            achievement = "⭐ Хорошая работа"
+        elif base_score >= 8:
+            achievement = "👍 Неплохо"
+        
+        score_data = {
+            "base_score": base_score,
+            "final_score": round(final_score, 2),
+            "achievement": achievement
+        }
+        # --- КОНЕЦ НОВОЙ ЛОГИКИ ---
         
         # Обновляем прогресс пользователя
         user_progress = update_user_progress(user_id, role_key, score_data['final_score'])
         
-        # Формируем сообщение о победе
-        victory_message = f"🥳 ПОБЕДА!\n\n"
-        victory_message += f"{llm_response}\n\n"
-        victory_message += f"━━━━━━━━━━━━━━━━━━━━\n"
-        victory_message += f"📊 Результаты:\n"
-        victory_message += f"• Базовая оценка: {score_data['base_score']}/20\n"
-        victory_message += f"• Финальный счет: {score_data['final_score']:.2f} баллов\n"
-        victory_message += f"• Сообщений отправлено: {message_count}\n"
+        # Формирование сообщения о победе (ВКЛЮЧАЯ АНАЛИЗ)
         
-        if score_data['achievement']:
-            victory_message += f"• Достижение: {score_data['achievement']}\n"
+        # Используем HTML для чистого форматирования
+        win_message = f"🎉 <b>ПОБЕДА! Клиент записан!</b> 🎉\n\n"
+        win_message += f"<b>Твоя финальная сделка:</b>\n"
+        win_message += llm_response # Финальная фраза клиента (должна быть без HTML-тегов)
+        win_message += f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
+        win_message += f"<b>📊 Результаты:</b>\n"
         
-        victory_message += f"\n📈 Прогресс:\n"
-        victory_message += f"• Пройдено уровней: {len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}\n"
-        victory_message += f"• Общий счет: {user_progress['total_score']:.2f} баллов\n"
+        # Используем <br> для переноса строки и <ul>/<li> (или просто <b> и \n)
+        # Для простоты используем \n и <b>:
+        win_message += f"• Базовая оценка (от Эксперта): <b>{base_score}/20</b>\n"
+        win_message += f"• Сообщений для победы: <b>{message_count}</b>\n"
+        win_message += f"• Финальный Счет (для Leaderboard): <b>{score_data['final_score']:.2f}</b>\n"
+        if achievement:
+             win_message += f"• <b>🏆 Достижение:</b> {achievement}\n"
+        
+        win_message += f"\n<b>🧠 Детальный анализ от Наставника:</b>\n"
+        
+        # Заменяем все * в тексте анализа на безопасные теги <b> (или просто удаляем, т.к. LLM может использовать Markdown)
+        # Оставляем анализ как есть, но полагаемся на HTML-форматирование:
+        win_message += analysis_text.replace('\n', '<br>') 
+        
+        win_message += f"\n━━━━━━━━━━━━━━━━━━━━\n"
+        win_message += f"<b>📈 Прогресс:</b>\n"
+        win_message += f"• Пройдено уровней: <b>{len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}</b>\n"
+        win_message += f"• Общий счет: <b>{user_progress['total_score']:.2f}</b> баллов\n"
         
         # Проверяем, есть ли следующий уровень
         if user_progress['current_level_index'] < len(ROLE_ORDER):
             next_role_key = ROLE_ORDER[user_progress['current_level_index']]
             next_role = ROLES[next_role_key]
-            victory_message += f"\n🎯 Следующий уровень: {next_role['name']}\n"
+            win_message += f"\n🎯 Следующий уровень: <b>{next_role['name']}</b>\n"
         else:
-            victory_message += f"\n🎉 Поздравляю! Ты прошел все уровни!\n"
+            win_message += f"\n🎉 Поздравляю! Ты прошел все уровни!\n"
         
-        victory_message += f"\nИспользуй /start для продолжения."
+        win_message += f"\nИспользуй /start для продолжения."
         
         # Разбиваем длинное сообщение на части если нужно
-        message_parts = split_long_message(victory_message)
+        message_parts = split_long_message(win_message)
         
         try:
-            # Отправляем первую часть
-            await update.message.reply_text(message_parts[0])
+            # Отправляем первую часть с HTML-форматированием
+            await update.message.reply_text(message_parts[0], parse_mode='HTML')
             
             # Отправляем остальные части если есть
             for part in message_parts[1:]:
-                await update.message.reply_text(part)
+                await update.message.reply_text(part, parse_mode='HTML')
         except Exception as e:
             print(f"Ошибка при отправке сообщения о победе: {e}")
             # Отправляем упрощенное сообщение
@@ -637,15 +628,73 @@ async def fallback(update: Update, context):
 # --- ОБРАБОТЧИК ОШИБОК ---
 async def error_handler(update: object, context):
     """Обработчик ошибок."""
-    print(f"Ошибка при обработке update: {update}")
-    import traceback
-    traceback.print_exc()
+    try:
+        error = context.error if hasattr(context, 'error') else None
+        
+        if update is None:
+            # Системная ошибка, не связанная с конкретным update
+            # Это может происходить при drop_pending_updates=True - игнорируем
+            if error:
+                print(f"⚠️ Системная ошибка (update=None): {type(error).__name__}: {error}")
+                import traceback
+                traceback.print_exc()
+            return
+        
+        # Ошибка при обработке конкретного update
+        update_id = update.update_id if hasattr(update, 'update_id') else 'unknown'
+        print(f"❌ Ошибка при обработке update {update_id}")
+        
+        if error:
+            print(f"   Тип ошибки: {type(error).__name__}")
+            print(f"   Сообщение: {str(error)}")
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f"   Детали ошибки недоступны")
+        
+        # Пытаемся отправить сообщение пользователю, если это возможно
+        try:
+            if update and hasattr(update, 'effective_message') and update.effective_message:
+                await update.effective_message.reply_text(
+                    "Извините, произошла ошибка при обработке вашего запроса. Попробуйте еще раз или используйте /start"
+                )
+        except Exception:
+            pass  # Игнорируем ошибки при отправке сообщения об ошибке
+    except Exception as e:
+        # Если сам обработчик ошибок упал, просто выводим информацию
+        print(f"Критическая ошибка в error_handler: {e}")
+        import traceback
+        traceback.print_exc()
 
 # --- ОСНОВНАЯ ФУНКЦИЯ BOT RUNNER ---
 def main():
     """Запуск бота."""
     try:
-        print("Инициализация бота...")
+        print("=" * 50)
+        print("НАЧАЛО ИНИЦИАЛИЗАЦИИ")
+        print("=" * 50)
+        
+        print("Шаг 1: Инициализация базы данных...")
+        try:
+            init_db()
+            print("✓ База данных инициализирована успешно")
+        except Exception as e:
+            print(f"✗ Ошибка при инициализации БД: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        
+        print("Шаг 2: Создание таблиц...")
+        try:
+            create_tables()
+            print("✓ Таблицы созданы успешно")
+        except Exception as e:
+            print(f"✗ Ошибка при создании таблиц: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        
+        print("Шаг 3: Инициализация бота...")
         application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
         
         # Добавляем обработчик ошибок

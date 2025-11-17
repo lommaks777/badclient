@@ -536,66 +536,95 @@ async def handle_message(update: Update, context):
         
         # Формирование сообщения о победе (ВКЛЮЧАЯ АНАЛИЗ)
         
-        # Используем HTML для чистого форматирования
-        win_message = f"🎉 <b>ПОБЕДА! Клиент записан!</b> 🎉\n\n"
-        win_message += f"<b>Твоя финальная сделка:</b>\n"
-        win_message += llm_response # Финальная фраза клиента (должна быть без HTML-тегов)
-        win_message += f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
-        win_message += f"<b>📊 Результаты:</b>\n"
+        # Функция для экранирования HTML-символов
+        def escape_html(text):
+            if not text:
+                return ""
+            return (text.replace('&', '&amp;')
+                       .replace('<', '&lt;')
+                       .replace('>', '&gt;'))
         
-        # Используем <br> для переноса строки и <ul>/<li> (или просто <b> и \n)
-        # Для простоты используем \n и <b>:
-        win_message += f"• Базовая оценка (от Эксперта): <b>{base_score}/20</b>\n"
-        win_message += f"• Сообщений для победы: <b>{message_count}</b>\n"
-        win_message += f"• Финальный Счет (для Leaderboard): <b>{score_data['final_score']:.2f}</b>\n"
+        # Экранируем текст клиента и анализа
+        escaped_llm_response = escape_html(llm_response)
+        escaped_analysis = escape_html(analysis_text)
+        
+        # Отправляем сообщения отдельными частями для надежности
+        # Сначала отправляем основную часть с результатами
+        results_message = f"🎉 <b>ПОБЕДА! Клиент записан!</b> 🎉\n\n"
+        results_message += f"<b>Твоя финальная сделка:</b>\n{escaped_llm_response}\n\n"
+        results_message += f"━━━━━━━━━━━━━━━━━━━━\n"
+        results_message += f"<b>📊 Результаты:</b>\n"
+        results_message += f"• Базовая оценка (от Эксперта): <b>{base_score}/20</b>\n"
+        results_message += f"• Сообщений для победы: <b>{message_count}</b>\n"
+        results_message += f"• Финальный Счет (для Leaderboard): <b>{score_data['final_score']:.2f}</b>\n"
         if achievement:
-             win_message += f"• <b>🏆 Достижение:</b> {achievement}\n"
+             results_message += f"• <b>🏆 Достижение:</b> {achievement}\n"
         
-        win_message += f"\n<b>🧠 Детальный анализ от Наставника:</b>\n"
+        # Отправляем сообщение с результатами
+        try:
+            await update.message.reply_text(results_message, parse_mode='HTML')
+        except Exception as e:
+            print(f"Ошибка при отправке сообщения с результатами: {e}")
+            # Отправляем без HTML если ошибка
+            results_message_plain = f"🎉 ПОБЕДА! Клиент записан! 🎉\n\n"
+            results_message_plain += f"Твоя финальная сделка:\n{llm_response}\n\n"
+            results_message_plain += f"━━━━━━━━━━━━━━━━━━━━\n"
+            results_message_plain += f"📊 Результаты:\n"
+            results_message_plain += f"• Базовая оценка (от Эксперта): {base_score}/20\n"
+            results_message_plain += f"• Сообщений для победы: {message_count}\n"
+            results_message_plain += f"• Финальный Счет (для Leaderboard): {score_data['final_score']:.2f}\n"
+            if achievement:
+                 results_message_plain += f"• 🏆 Достижение: {achievement}\n"
+            await update.message.reply_text(results_message_plain)
         
-        # Заменяем все * в тексте анализа на безопасные теги <b> (или просто удаляем, т.к. LLM может использовать Markdown)
-        # Оставляем анализ как есть, но полагаемся на HTML-форматирование:
-        win_message += analysis_text.replace('\n', '<br>') 
+        # Отправляем анализ отдельным сообщением
+        analysis_header = f"<b>🧠 Детальный анализ от Наставника:</b>\n\n"
+        analysis_full = analysis_header + escaped_analysis
         
-        win_message += f"\n━━━━━━━━━━━━━━━━━━━━\n"
-        win_message += f"<b>📈 Прогресс:</b>\n"
-        win_message += f"• Пройдено уровней: <b>{len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}</b>\n"
-        win_message += f"• Общий счет: <b>{user_progress['total_score']:.2f}</b> баллов\n"
+        # Разбиваем анализ на части если нужно
+        analysis_parts = split_long_message(analysis_full)
         
-        # Проверяем, есть ли следующий уровень
+        try:
+            for part in analysis_parts:
+                await update.message.reply_text(part, parse_mode='HTML')
+        except Exception as e:
+            print(f"Ошибка при отправке анализа: {e}")
+            # Отправляем анализ без HTML если ошибка
+            analysis_parts_plain = split_long_message("🧠 Детальный анализ от Наставника:\n\n" + analysis_text)
+            for part in analysis_parts_plain:
+                await update.message.reply_text(part)
+        
+        # Отправляем прогресс отдельным сообщением
+        progress_message = f"━━━━━━━━━━━━━━━━━━━━\n"
+        progress_message += f"<b>📈 Прогресс:</b>\n"
+        progress_message += f"• Пройдено уровней: <b>{len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}</b>\n"
+        progress_message += f"• Общий счет: <b>{user_progress['total_score']:.2f}</b> баллов\n"
+        
         if user_progress['current_level_index'] < len(ROLE_ORDER):
             next_role_key = ROLE_ORDER[user_progress['current_level_index']]
             next_role = ROLES[next_role_key]
-            win_message += f"\n🎯 Следующий уровень: <b>{next_role['name']}</b>\n"
+            progress_message += f"\n🎯 Следующий уровень: <b>{next_role['name']}</b>\n"
         else:
-            win_message += f"\n🎉 Поздравляю! Ты прошел все уровни!\n"
+            progress_message += f"\n🎉 Поздравляю! Ты прошел все уровни!\n"
         
-        win_message += f"\nИспользуй /start для продолжения."
-        
-        # Разбиваем длинное сообщение на части если нужно
-        message_parts = split_long_message(win_message)
+        progress_message += f"\nИспользуй /start для продолжения."
         
         try:
-            # Отправляем первую часть с HTML-форматированием
-            await update.message.reply_text(message_parts[0], parse_mode='HTML')
-            
-            # Отправляем остальные части если есть
-            for part in message_parts[1:]:
-                await update.message.reply_text(part, parse_mode='HTML')
+            await update.message.reply_text(progress_message, parse_mode='HTML')
         except Exception as e:
-            print(f"Ошибка при отправке сообщения о победе: {e}")
-            # Отправляем упрощенное сообщение
-            try:
-                await update.message.reply_text(
-                    f"🥳 ПОБЕДА!\n\n"
-                    f"📊 Результаты:\n"
-                    f"• Базовая оценка: {score_data['base_score']}/20\n"
-                    f"• Финальный счет: {score_data['final_score']:.2f} баллов\n"
-                    f"• Пройдено уровней: {len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}\n\n"
-                    f"Используй /start для продолжения."
-                )
-            except Exception as e2:
-                print(f"Критическая ошибка при отправке сообщения: {e2}")
+            print(f"Ошибка при отправке прогресса: {e}")
+            progress_message_plain = f"━━━━━━━━━━━━━━━━━━━━\n"
+            progress_message_plain += f"📈 Прогресс:\n"
+            progress_message_plain += f"• Пройдено уровней: {len(user_progress['completed_roles'])}/{len(ROLE_ORDER)}\n"
+            progress_message_plain += f"• Общий счет: {user_progress['total_score']:.2f} баллов\n"
+            if user_progress['current_level_index'] < len(ROLE_ORDER):
+                next_role_key = ROLE_ORDER[user_progress['current_level_index']]
+                next_role = ROLES[next_role_key]
+                progress_message_plain += f"\n🎯 Следующий уровень: {next_role['name']}\n"
+            else:
+                progress_message_plain += f"\n🎉 Поздравляю! Ты прошел все уровни!\n"
+            progress_message_plain += f"\nИспользуй /start для продолжения."
+            await update.message.reply_text(progress_message_plain)
         
         # Очищаем состояние диалога
         context.user_data.clear()

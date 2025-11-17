@@ -1,6 +1,3 @@
-# Конфигурация с API ключами
-config.py
-
 # Python
 __pycache__/
 *.py[cod]
